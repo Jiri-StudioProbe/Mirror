@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#9fb0bd">
+<title>Misty Mirror</title>
+<link rel="icon" href="data:,">
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: #9fb0bd;
+    overscroll-behavior: none;
+  }
+  body {
+    position: fixed;
+    inset: 0;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+
+  /* Shown before the camera is live: a plain misty pane. */
+  #pane {
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(120% 90% at 30% 20%, #d5dfe6 0%, #a9b9c5 55%, #8196a5 100%);
+  }
+
+  /* The feed, mirrored. Its CSS filter is the fog (blurred + brightened). */
+  #feed {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transform: scaleX(-1) scale(1.12); /* scale hides the blur's soft edges */
+    opacity: 0;
+    transition: opacity .6s ease;
+    pointer-events: none;
+  }
+  #feed.live { opacity: 1; }
+
+  /* Sharp feed, masked by wipe times; sits above the fog. */
+  #clear {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+
+  #hint {
+    position: absolute;
+    left: 0; right: 0;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 12vh);
+    text-align: center;
+    padding: 0 24px;
+    color: rgba(255, 255, 255, .92);
+    font-size: 17px;
+    letter-spacing: .02em;
+    text-shadow: 0 1px 12px rgba(40, 60, 80, .55);
+    transition: opacity .8s ease;
+    pointer-events: none;
+  }
+  #hint.hidden { opacity: 0; }
+</style>
+</head>
+<body>
+<div id="pane"></div>
+<video id="feed" playsinline webkit-playsinline muted autoplay></video>
+<canvas id="clear"></canvas>
+<div id="hint">Touch the glass to wipe the mist</div>
+
+<script>
+(() => {
+  'use strict';
+
+  // ---- Tunables ------------------------------------------------------------
+  const HOLD_MS      = 10000; // fully clear after a wipe
+  const FADE_MS      = 5000;  // then fades back to fog over this long
+  const BRUSH_RADIUS = 52;    // CSS px
+  const FOG_BLUR     = 28;    // CSS px
+  // --------------------------------------------------------------------------
+  const CELL        = 8;      // mask grid cell size in CSS px (~1/8 resolution)
+  const SMOOTH_PASS = 2;      // box-blur passes over the mask grid
+  const MAX_DPR     = 1.5;
+
+  const feed   = document.getElementById('feed');
+  const canvas = document.getElementById('clear');
+  const hint   = document.getElementById('hint');
+  const ctx    = canvas.getContext('2d');
+
+  feed.style.filter = `blur(${FOG_BLUR}px) brightness(1.3) saturate(.75) contrast(.9)`;
+  feed.style.webkitFilter = feed.style.filter;
+
+  // ---- State ---------------------------------------------------------------
+  let W = 0, H = 0, dpr = 1;
+  let gw = 0, gh = 0;
+  let wipedAt;                  // Float64Array: last-wipe timestamp per cell
+  let alpha, tmp;               // Float32Array scratch for the smoothed mask
+  let maskCanvas, maskCtx, maskImg;
+  let lastWipe = -Infinity;     // newest wipe anywhere, to skip idle frames
+  let camera = 'idle';          // idle | asking | live | error
+  let wipedOnce = false;
+  let pointer = null;           // { id, x, y }
+  let drewLastFrame = false;
+
+  function resize() {
+    W = window.innerWidth;
+    H = window.innerHeight;
+    dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
+    canvas.width  = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+
+    gw = Math.ceil(W / CELL);
+    gh = Math.ceil(H / CELL);
+    wipedAt = new Float64Array(gw * gh).fill(-Infinity);
+    alpha = new Float32Array(gw * gh);
+    tmp   = new Float32Array(gw * gh);
+
+    maskCanvas = document.createElement('canvas');
+    maskCanvas.width = gw;
+    maskCanvas.height = gh;
+    maskCtx = maskCanvas.getContext('2d');
+    maskImg = maskCtx.createImageData(gw, gh);
+    lastWipe = -Infinity;
+    drewLastFrame = false;
+  }
+
+  // ---- Wiping --------------------------------------------------------------
+  function stamp(x, y, now) {
+    const r  = BRUSH_RADIUS / CELL;
+    const cx = x / CELL, cy = y / CELL;
+    const x0 = Math.max(0, Math.floor(cx - r)), x1 = Math.min(gw - 1, Math.ceil(cx + r));
+    const y0 = Math.max(0, Math.floor(cy - r)), y1 = Math.min(gh - 1, Math.ceil(cy + r));
+    const r2 = r * r;
+    for (let j = y0; j <= y1; j++) {
+      const dy = j + 0.5 - cy;
+      for (let i = x0; i <= x1; i++) {
+        const dx = i + 0.5 - cx;
+        if (dx * dx + dy * dy <= r2) wipedAt[j * gw + i] = now;
+      }
+    }
+    lastWipe = now;
+  }
+
+  // Stamp along the segment so fast swipes leave no gaps.
+  function wipeLine(x0, y0, x1, y1) {
+    const now  = performance.now();
+    const dist = Math.hypot(x1 - x0, y1 - y0);
+    const step = BRUSH_RADIUS / 4;
+    const n    = Math.max(1, Math.ceil(dist / step));
+    for (let k = 1; k <= n; k++) {
+      const t = k / n;
+      stamp(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, now);
+    }
+  }
+
+  function onDown(e) {
+    if (pointer) return;
+    pointer = { id: e.pointerId, x: e.clientX, y: e.clientY };
+    try { document.body.setPointerCapture(e.pointerId); } catch (_) {}
+    wipeLine(pointer.x, pointer.y, pointer.x, pointer.y);
+    if (camera === 'idle' || camera === 'error') startCamera();
+    noteWipe();
+    e.preventDefault();
+  }
+
+  function onMove(e) {
+    if (!pointer || e.pointerId !== pointer.id) return;
+    const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
+    const list = events.length ? events : [e];
+    for (const ev of list) {
+      wipeLine(pointer.x, pointer.y, ev.clientX, ev.clientY);
+      pointer.x = ev.clientX;
+      pointer.y = ev.clientY;
+    }
+    noteWipe();
+    e.preventDefault();
+  }
+
+  function onUp(e) {
+    if (pointer && e.pointerId === pointer.id) pointer = null;
+  }
+
+  function noteWipe() {
+    if (!wipedOnce && camera === 'live') {
+      wipedOnce = true;
+      hint.classList.add('hidden');
+    }
+  }
+
+  // ---- Camera --------------------------------------------------------------
+  function say(text) {
+    hint.textContent = text;
+    hint.classList.remove('hidden');
+  }
+
+  async function startCamera() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      camera = 'error';
+      say(window.isSecureContext
+        ? 'This browser has no camera access'
+        : 'Camera needs HTTPS or localhost');
+      return;
+    }
+    camera = 'asking';
+    say('Allow camera access…');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: 'user',
+          width:  { ideal: 1280 },
+          height: { ideal: 720 },
+          frameRate: { ideal: 30 }
+        }
+      });
+      feed.srcObject = stream;
+      await feed.play();
+      feed.classList.add('live');
+      camera = 'live';
+      wipedOnce = false;
+      say('Wipe the mist with your finger');
+    } catch (err) {
+      camera = 'error';
+      const denied = err && (err.name === 'NotAllowedError' || err.name === 'SecurityError');
+      say(denied ? 'Camera blocked — allow access, then touch again'
+                 : 'Couldn’t start the camera — touch to retry');
+    }
+  }
+
+  // ---- Rendering -----------------------------------------------------------
+  function boxBlur(src, dst) {
+    // horizontal, radius 1, edge clamped
+    for (let j = 0; j < gh; j++) {
+      const row = j * gw;
+      for (let i = 0; i < gw; i++) {
+        const a = src[row + (i > 0 ? i - 1 : 0)];
+        const b = src[row + i];
+        const c = src[row + (i < gw - 1 ? i + 1 : i)];
+        dst[row + i] = (a + b + c) / 3;
+      }
+    }
+  }
+  function boxBlurV(src, dst) {
+    for (let j = 0; j < gh; j++) {
+      const up = (j > 0 ? j - 1 : 0) * gw;
+      const mid = j * gw;
+      const dn = (j < gh - 1 ? j + 1 : j) * gw;
+      for (let i = 0; i < gw; i++) {
+        dst[mid + i] = (src[up + i] + src[mid + i] + src[dn + i]) / 3;
+      }
+    }
+  }
+
+  function buildMask(now) {
+    // Per-cell clearness: 1 for HOLD_MS after a wipe, then linear ramp to 0 over FADE_MS.
+    for (let k = 0; k < alpha.length; k++) {
+      const age = now - wipedAt[k];
+      alpha[k] = age < HOLD_MS ? 1
+               : age < HOLD_MS + FADE_MS ? 1 - (age - HOLD_MS) / FADE_MS
+               : 0;
+    }
+    // Soften the grid so the upscale has no visible blockiness.
+    for (let p = 0; p < SMOOTH_PASS; p++) {
+      boxBlur(alpha, tmp);
+      boxBlurV(tmp, alpha);
+    }
+    const d = maskImg.data;
+    for (let k = 0, o = 3; k < alpha.length; k++, o += 4) d[o] = alpha[k] * 255 + 0.5;
+    maskCtx.putImageData(maskImg, 0, 0);
+  }
+
+  function drawFeedMirrored() {
+    const vw = feed.videoWidth, vh = feed.videoHeight;
+    if (!vw || !vh) return false;
+    // Same crop as CSS object-fit: cover.
+    const s  = Math.max(W / vw, H / vh);
+    const sw = W / s, sh = H / s;
+    const sx = (vw - sw) / 2, sy = (vh - sh) / 2;
+    ctx.save();
+    ctx.translate(W, 0);
+    ctx.scale(-1, 1);
+    ctx.drawImage(feed, sx, sy, sw, sh, 0, 0, W, H);
+    ctx.restore();
+    return true;
+  }
+
+  function frame() {
+    requestAnimationFrame(frame);
+    const now = performance.now();
+    const active = camera === 'live' && feed.readyState >= 2 &&
+                   now - lastWipe < HOLD_MS + FADE_MS;
+    if (!active) {
+      if (drewLastFrame) {
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        drewLastFrame = false;
+      }
+      return;
+    }
+
+    buildMask(now);
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.clearRect(0, 0, W, H);
+    if (!drawFeedMirrored()) return;
+    ctx.globalCompositeOperation = 'destination-in';
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(maskCanvas, 0, 0, gw * CELL, gh * CELL);
+    ctx.globalCompositeOperation = 'source-over';
+    drewLastFrame = true;
+  }
+
+  // ---- Boot ----------------------------------------------------------------
+  window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', resize);
+  document.body.addEventListener('pointerdown', onDown);
+  document.body.addEventListener('pointermove', onMove);
+  document.body.addEventListener('pointerup', onUp);
+  document.body.addEventListener('pointercancel', onUp);
+  document.addEventListener('gesturestart', e => e.preventDefault());
+  document.addEventListener('contextmenu', e => e.preventDefault());
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
