@@ -8,4 +8,4 @@ Brush width follows finger contact size where the device reports it (clamped by 
 
 ## Sound
 
-With `?tune`, the "Sound volume" slider plays short finger-on-glass squeaks (`audio/squeaks.mp3`) while the finger is moving over the glass. They were cut from "squeak-finger-on-glass" by freesound_community (file 73186, downloaded from a free sound library); check that library's licence before any wider use.
+The wipe sound (default volume 50; "Sound volume" slider in `?tune`, 0 = off) plays short finger-on-glass squeaks (`audio/squeaks.mp3`) while the finger is moving over the glass. They were cut from "squeak-finger-on-glass" by freesound_community (file 73186, downloaded from a free sound library); check that library's licence before any wider use.
