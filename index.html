@@ -146,7 +146,7 @@
   <canvas id="clear"></canvas>
   <div id="topfade" class="edgefade"></div>
   <div id="bottomfade" class="edgefade"></div>
-  <div id="hint">Touch the glass to wipe the mist</div>
+  <div id="hint" class="hidden"></div>
 </div>
 
 <script>
@@ -154,7 +154,7 @@
   'use strict';
 
   // ---- Tunables ------------------------------------------------------------
-  const HOLD_MS      = 10000; // fully clear after a wipe
+  const HOLD_MS      = 7000;  // fully clear after a wipe
   const FADE_MS      = 5000;  // then fades back to fog over this long
   // Tuned live with ?tune. BRUSH_RADIUS is used when the device reports no contact size.
   const DEFAULTS = {
@@ -163,7 +163,8 @@
     BRUSH_MAX: 77,          // CSS px, largest brush from contact size
     EDGE_SOFTNESS: 0.7,     // wipe-edge softness; 1 = softest, lower = sharper
     EDGE_FADE: 20,          // CSS px, top/bottom fade into the toolbar colour; 0 = off
-    SOUND: 50               // wipe sound volume, 0-100; 0 = off
+    SOUND: 50,              // wipe sound volume, 0-100; 0 = off
+    WRITE_WIDTH: 3          // CSS px, line width of the greeting written on the mirror; 0 = off
   };
   const cfg = Object.assign({}, DEFAULTS);
   const tuning = /[?&]tune\b/.test(location.search);
@@ -230,6 +231,8 @@
   let brush = cfg.BRUSH_RADIUS;     // current brush radius, CSS px
   let touchDiameter = 0;        // latest Touch radius * 2 (iOS fallback)
   let drewLastFrame = false;
+  let ink = null;               // the greeting, see "Greeting" below
+  let maskFull, mfCtx;          // full-size mask used while the greeting is alive
 
   // Make the video element exactly the "cover" size for the stage.
   function layoutFeed() {
@@ -261,6 +264,11 @@
     maskCanvas.height = gh;
     maskCtx = maskCanvas.getContext('2d');
     maskImg = maskCtx.createImageData(gw, gh);
+    maskFull = document.createElement('canvas');
+    maskFull.width = canvas.width;
+    maskFull.height = canvas.height;
+    mfCtx = maskFull.getContext('2d');
+    ink = null;
     lastWipe = -Infinity;
     drewLastFrame = false;
     layoutFeed();
@@ -377,6 +385,7 @@
       }
     }
     lastWipe = now;
+    if (ink) eraseInk(x, y, brush);
   }
 
   // Stamp along the segment so fast swipes leave no gaps.
@@ -420,13 +429,14 @@
 
   function onDown(e) {
     if (pointer) return;
+    // Nothing to wipe until the camera is live (a touch only retries a failed start).
+    if (camera !== 'live') { if (camera === 'error') startCamera(); return; }
     pointer = { id: e.pointerId, x: e.clientX, y: e.clientY };
     brush = cfg.BRUSH_RADIUS;
     updateBrush(e);
     ensureAudio();
     try { stage.setPointerCapture(e.pointerId); } catch (_) {}
     wipeLine(pointer.x, pointer.y, pointer.x, pointer.y);
-    if (camera === 'idle' || camera === 'error') startCamera();
     noteWipe();
     e.preventDefault();
   }
@@ -486,7 +496,7 @@
       return;
     }
     camera = 'asking';
-    say('Allow camera access…');
+    setTimeout(() => { if (camera === 'asking') say('Allow camera access…'); }, 400);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
@@ -505,13 +515,174 @@
       feed.classList.add('live');
       camera = 'live';
       wipedOnce = false;
-      say('Wipe the mist with your finger');
+      hint.classList.add('hidden');
+      greet();
     } catch (err) {
       camera = 'error';
       const denied = err && (err.name === 'NotAllowedError' || err.name === 'SecurityError');
       say(denied ? 'Camera blocked — allow access, then touch again'
                  : 'Couldn’t start the camera — touch to retry');
     }
+  }
+
+  // ---- Greeting ------------------------------------------------------------
+  // "Hello you" is written on the mist as if by a finger: single-line handwriting
+  // strokes are traced point by point, and each point is a clear (wiped) spot that
+  // holds and fades like any other wipe. Wiping over it erases it.
+  const GREETING = 'Hello you';
+  const GLYPHS = {
+  H: { adv: 112, strokes: [
+    'M 14 14 C 20 70 18 140 12 200',
+    'M 86 6 C 92 70 88 140 82 196',
+    'M 10 104 C 36 96 62 112 90 100'
+  ]},
+  e: { adv: 88, strokes: [
+    'M 16 160 C 40 162 74 154 68 134 C 62 112 26 112 20 152 C 15 190 48 210 80 188'
+  ]},
+  l: { adv: 54, strokes: [
+    'M 30 8 C 40 60 34 140 30 190 C 29 204 40 208 56 192'
+  ]},
+  o: { adv: 88, strokes: [
+    'M 56 116 C 26 110 10 150 24 184 C 38 210 78 202 80 160 C 82 128 66 114 54 116 C 66 116 78 112 90 104'
+  ]},
+  y: { adv: 98, strokes: [
+    'M 14 114 C 16 156 30 184 52 184 C 68 184 76 156 78 114',
+    'M 80 112 C 82 170 80 236 62 270 C 50 292 24 292 22 274'
+  ]},
+  u: { adv: 98, strokes: [
+    'M 14 114 C 16 156 28 186 52 186 C 68 186 76 160 78 114',
+    'M 80 112 C 80 150 80 176 84 198 C 87 208 98 204 106 194'
+  ]},
+  ' ': { adv: 50, strokes: [] }
+};
+  const WRITE_SLANT = 0.18;    // lean of the handwriting
+  const WRITE_TILT  = -0.05;   // radians; slight upward slope
+  const PEN_SPEED   = 420;     // px/s
+  const WRITE_STEP  = 2;       // px between traced points
+
+  function parseStrokes(d) {
+    const t = d.split(/\s+/);
+    const segs = [];
+    let i = 0, cx = 0, cy = 0;
+    while (i < t.length) {
+      const k = t[i++];
+      if (k === 'M') { cx = +t[i++]; cy = +t[i++]; }
+      else if (k === 'C') {
+        const c1x = +t[i++], c1y = +t[i++], c2x = +t[i++], c2y = +t[i++], x = +t[i++], y = +t[i++];
+        segs.push([cx, cy, c1x, c1y, c2x, c2y, x, y]);
+        cx = x; cy = y;
+      }
+    }
+    const start = t[0] === 'M' ? [+t[1], +t[2]] : [0, 0];
+    return { start, segs };
+  }
+
+  function buildInk(startAt) {
+    if (cfg.WRITE_WIDTH <= 0) return null;
+    let units = 0;
+    for (const ch of GREETING) units += (GLYPHS[ch] || GLYPHS[' ']).adv;
+    const sc = Math.min(W * 0.76 / units, 0.55);
+    const ox0 = (W - units * sc) / 2;
+    const oy = H * 0.42 - 150 * sc;
+    const mx = W / 2, my = H * 0.42;
+    const cosT = Math.cos(WRITE_TILT), sinT = Math.sin(WRITE_TILT);
+    const xs = [], ys = [], ts = [], first = [];
+    let ox = ox0, clock = startAt;
+    for (const ch of GREETING) {
+      const g = GLYPHS[ch] || GLYPHS[' '];
+      for (const d of g.strokes) {
+        const { start, segs } = parseStrokes(d);
+        // Flatten the curves to points in screen px.
+        const raw = [];
+        const put = (x, y) => {
+          const ux = x + (200 - y) * WRITE_SLANT;
+          const px = ox + ux * sc, py = oy + y * sc;
+          raw.push([mx + (px - mx) * cosT - (py - my) * sinT, my + (px - mx) * sinT + (py - my) * cosT]);
+        };
+        put(start[0], start[1]);
+        for (const [x0, y0, x1, y1, x2, y2, x3, y3] of segs) {
+          for (let k = 1; k <= 24; k++) {
+            const u = k / 24, v = 1 - u;
+            put(v*v*v*x0 + 3*v*v*u*x1 + 3*v*u*u*x2 + u*u*u*x3,
+                v*v*v*y0 + 3*v*v*u*y1 + 3*v*u*u*y2 + u*u*u*y3);
+          }
+        }
+        // Resample at an even spacing so the pen moves at a steady speed.
+        let carry = 0, px = raw[0][0], py = raw[0][1], isFirst = true;
+        xs.push(px); ys.push(py); ts.push(clock); first.push(1);
+        for (let k = 1; k < raw.length; k++) {
+          let [qx, qy] = raw[k];
+          let seg = Math.hypot(qx - px, qy - py);
+          while (carry + seg >= WRITE_STEP) {
+            const f = (WRITE_STEP - carry) / seg;
+            px += (qx - px) * f; py += (qy - py) * f;
+            seg = Math.hypot(qx - px, qy - py);
+            carry = 0;
+            clock += WRITE_STEP / PEN_SPEED * 1000;
+            xs.push(px); ys.push(py); ts.push(clock); first.push(0);
+          }
+          carry += seg; px = qx; py = qy;
+        }
+        clock += 110;               // lift the finger between strokes
+      }
+      clock += ch === ' ' ? 260 : 50;
+      ox += g.adv * sc;
+    }
+    return {
+      n: xs.length,
+      xs: Float32Array.from(xs), ys: Float32Array.from(ys),
+      ts: Float64Array.from(ts), first: Uint8Array.from(first),
+      erased: new Uint8Array(xs.length),
+      end: clock
+    };
+  }
+
+  const inkAlive = now => ink && now < ink.end + HOLD_MS + FADE_MS;
+
+  function greet() {
+    const now = performance.now();
+    ink = buildInk(now + 500);
+    if (!ink) { say('Wipe the mist with your finger'); return; }
+    // Show the usual hint once the writing is done, unless they have already wiped.
+    setTimeout(() => { if (!wipedOnce) say('Wipe the mist with your finger'); }, ink.end - now + 400);
+  }
+
+  function eraseInk(x, y, r) {
+    const r2 = r * r;
+    for (let i = 0; i < ink.n; i++) {
+      const dx = ink.xs[i] - x, dy = ink.ys[i] - y;
+      if (dx * dx + dy * dy <= r2) ink.erased[i] = 1;
+    }
+  }
+
+  // Draw the written part of the greeting into the mask (alpha = how clear).
+  function drawInk(c, now) {
+    const levels = 8;
+    const paths = [];
+    for (let l = 0; l <= levels; l++) paths.push(null);
+    for (let i = 1; i < ink.n; i++) {
+      if (ink.first[i] || ink.ts[i] > now || ink.erased[i] || ink.erased[i - 1]) continue;
+      const age = now - ink.ts[i];
+      const a = age < HOLD_MS ? 1 : age < HOLD_MS + FADE_MS ? 1 - (age - HOLD_MS) / FADE_MS : 0;
+      const l = Math.ceil(a * levels);
+      if (l <= 0) continue;
+      const p = paths[l] || (paths[l] = new Path2D());
+      p.moveTo(ink.xs[i - 1], ink.ys[i - 1]);
+      p.lineTo(ink.xs[i], ink.ys[i]);
+    }
+    c.lineCap = 'round';
+    c.lineJoin = 'round';
+    c.strokeStyle = '#000';
+    for (let l = 1; l <= levels; l++) {
+      if (!paths[l]) continue;
+      c.globalAlpha = 0.3 * l / levels;               // soft shoulder
+      c.lineWidth = cfg.WRITE_WIDTH * 2.2;
+      c.stroke(paths[l]);
+      c.globalAlpha = l / levels;                     // core line
+      c.lineWidth = cfg.WRITE_WIDTH;
+      c.stroke(paths[l]);
+    }
+    c.globalAlpha = 1;
   }
 
   // ---- Rendering -----------------------------------------------------------
@@ -577,8 +748,9 @@
     requestAnimationFrame(frame);
     const now = performance.now();
     updateSound(now);
+    if (ink && !inkAlive(now)) ink = null;
     const active = camera === 'live' && feed.readyState >= 2 &&
-                   now - lastWipe < HOLD_MS + FADE_MS;
+                   (now - lastWipe < HOLD_MS + FADE_MS || ink);
     if (!active) {
       if (drewLastFrame) {
         ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -597,7 +769,19 @@
     ctx.globalCompositeOperation = 'destination-in';
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(maskCanvas, 0, 0, gw * CELL, gh * CELL);
+    if (ink) {
+      // Wipes plus the greeting, combined at full resolution so thin lines stay crisp.
+      mfCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      mfCtx.globalCompositeOperation = 'source-over';
+      mfCtx.clearRect(0, 0, W, H);
+      mfCtx.imageSmoothingEnabled = true;
+      mfCtx.imageSmoothingQuality = 'high';
+      mfCtx.drawImage(maskCanvas, 0, 0, gw * CELL, gh * CELL);
+      drawInk(mfCtx, now);
+      ctx.drawImage(maskFull, 0, 0, W, H);
+    } else {
+      ctx.drawImage(maskCanvas, 0, 0, gw * CELL, gh * CELL);
+    }
     ctx.globalCompositeOperation = 'source-over';
     drewLastFrame = true;
   }
@@ -610,12 +794,13 @@
       ['BRUSH_MAX',     'Thick radius',   8, 90, 1],
       ['EDGE_SOFTNESS', 'Edge softness',  0.2, 1.2, 0.05],
       ['EDGE_FADE',     'Bar fade',       0, 160, 2],
-      ['SOUND',         'Sound volume',   0, 100, 5]
+      ['SOUND',         'Sound volume',   0, 100, 5],
+      ['WRITE_WIDTH',   'Writing width',  0, 8, 0.5]
     ];
     const panel = document.createElement('div');
     panel.id = 'tune';
     const outs = {};
-    const fmt = (k, v) => k === 'EDGE_SOFTNESS' ? Number(v).toFixed(2) : String(Math.round(v));
+    const fmt = (k, v) => k === 'EDGE_SOFTNESS' ? Number(v).toFixed(2) : k === 'WRITE_WIDTH' ? Number(v).toFixed(1) : String(Math.round(v));
     for (const [key, label, min, max, step] of sliders) {
       const row = document.createElement('label');
       row.className = 'row';
@@ -644,6 +829,9 @@
     copy.textContent = 'Copy';
     const reset = document.createElement('button');
     reset.textContent = 'Reset';
+    const replay = document.createElement('button');
+    replay.textContent = 'Replay';
+    replay.addEventListener('click', () => { if (camera === 'live') greet(); });
     const line = () => sliders.map(([k]) => `${k}=${fmt(k, cfg[k])}`).join(' ');
     copy.addEventListener('click', async () => {
       try { await navigator.clipboard.writeText(line()); copy.textContent = 'Copied'; }
@@ -657,7 +845,7 @@
       applySound();
     });
     debug.className = 'info';
-    bar.append(copy, reset, debug);
+    bar.append(copy, reset, replay, debug);
     panel.appendChild(bar);
     const note = document.createElement('div');
     note.style.cssText = 'margin-top:6px;opacity:.6;font-size:11px';
@@ -685,6 +873,7 @@
 
   resize();
   requestAnimationFrame(frame);
+  startCamera();   // ask for the camera straight away
 })();
 </script>
 </body>
