@@ -18,12 +18,18 @@
   body {
     position: fixed;
     inset: 0;
-    touch-action: none;
     user-select: none;
     -webkit-user-select: none;
     -webkit-touch-callout: none;
     -webkit-tap-highlight-color: transparent;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+
+  /* Everything the finger wipes lives in here; the tuning panel sits outside it. */
+  #stage {
+    position: absolute;
+    inset: 0;
+    touch-action: none;
   }
 
   /* Shown before the camera is live: a plain misty pane. */
@@ -71,13 +77,42 @@
     pointer-events: none;
   }
   #hint.hidden { opacity: 0; }
+
+  /* Tuning panel, only with ?tune */
+  #tune {
+    position: fixed;
+    left: 8px; right: 8px;
+    top: calc(env(safe-area-inset-top, 0px) + 8px);
+    max-width: 380px;
+    box-sizing: border-box;
+    padding: 10px 12px 8px;
+    border-radius: 12px;
+    background: rgba(20, 28, 36, .78);
+    color: #fff;
+    font: 13px/1.3 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: manipulation;
+    z-index: 10;
+  }
+  #tune .row { display: grid; grid-template-columns: 92px 1fr 40px; align-items: center; gap: 8px; margin: 4px 0; }
+  #tune .row output { text-align: right; font-variant-numeric: tabular-nums; }
+  #tune input[type=range] { width: 100%; margin: 0; touch-action: pan-x; }
+  #tune .bar { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+  #tune button {
+    font: inherit; color: #fff; background: rgba(255,255,255,.16);
+    border: 0; border-radius: 8px; padding: 6px 12px;
+  }
+  #tune .info { flex: 1; text-align: right; opacity: .75; font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
-<div id="pane"></div>
-<video id="feed" playsinline webkit-playsinline muted autoplay></video>
-<canvas id="clear"></canvas>
-<div id="hint">Touch the glass to wipe the mist</div>
+<div id="stage">
+  <div id="pane"></div>
+  <video id="feed" playsinline webkit-playsinline muted autoplay></video>
+  <canvas id="clear"></canvas>
+  <div id="hint">Touch the glass to wipe the mist</div>
+</div>
 
 <script>
 (() => {
@@ -86,29 +121,39 @@
   // ---- Tunables ------------------------------------------------------------
   const HOLD_MS      = 10000; // fully clear after a wipe
   const FADE_MS      = 5000;  // then fades back to fog over this long
-  const BRUSH_RADIUS = 26;    // CSS px, used when the device reports no contact size
-  const BRUSH_MIN    = 12;    // CSS px, smallest brush from contact size
-  const BRUSH_MAX    = 46;    // CSS px, largest brush from contact size
-  const REF_CONTACT  = 28;    // CSS px, finger contact diameter that gives BRUSH_RADIUS
+  // Tuned live with ?tune. BRUSH_RADIUS is used when the device reports no contact size.
+  const DEFAULTS = {
+    BRUSH_MIN: 12,          // CSS px, smallest brush from contact size
+    BRUSH_RADIUS: 26,       // CSS px, brush at the reference contact size
+    BRUSH_MAX: 46,          // CSS px, largest brush from contact size
+    EDGE_SOFTNESS: 0.8      // wipe-edge softness; 1 = softest, lower = sharper
+  };
+  const cfg = Object.assign({}, DEFAULTS);
+  const REF_CONTACT  = 28;    // CSS px, finger contact diameter that gives cfg.BRUSH_RADIUS
   const FOG_BLUR     = 28;    // CSS px
   // --------------------------------------------------------------------------
   const CELL        = 8;      // mask grid cell size in CSS px (~1/8 resolution)
-  const SMOOTH_PASS = 2;      // box-blur passes over the mask grid
+  const SMOOTH_PASS = 2;      // blur passes over the mask grid
+  let EDGE_W = 0, EDGE_C = 1;   // 3-tap kernel weights, derived from cfg.EDGE_SOFTNESS
   const MAX_DPR     = 1.5;
 
+  const stage  = document.getElementById('stage');
   const feed   = document.getElementById('feed');
   const canvas = document.getElementById('clear');
   const hint   = document.getElementById('hint');
   const ctx    = canvas.getContext('2d');
 
-  // Add ?debug to the URL to see the contact size your device reports.
+  // ?tune shows sliders for the brush and edge softness; ?debug shows the contact readout alone.
+  const params = new URLSearchParams(location.search);
   let debug = null;
-  if (new URLSearchParams(location.search).has('debug')) {
+  if (params.has('tune') || params.has('debug')) {
     debug = document.createElement('div');
-    debug.style.cssText = 'position:fixed;top:12px;left:12px;font:13px monospace;color:#fff;' +
-      'background:rgba(0,0,0,.5);padding:4px 8px;border-radius:6px;pointer-events:none';
     debug.textContent = 'contact: touch to measure';
-    document.body.appendChild(debug);
+    if (!params.has('tune')) {
+      debug.style.cssText = 'position:fixed;top:12px;left:12px;font:13px monospace;color:#fff;' +
+        'background:rgba(0,0,0,.5);padding:4px 8px;border-radius:6px;pointer-events:none';
+      document.body.appendChild(debug);
+    }
   }
 
   feed.style.filter = `blur(${FOG_BLUR}px) brightness(1.3) saturate(.75) contrast(.9)`;
@@ -124,7 +169,7 @@
   let camera = 'idle';          // idle | asking | live | error
   let wipedOnce = false;
   let pointer = null;           // { id, x, y }
-  let brush = BRUSH_RADIUS;     // current brush radius, CSS px
+  let brush = cfg.BRUSH_RADIUS;     // current brush radius, CSS px
   let touchDiameter = 0;        // latest Touch radius * 2 (iOS fallback)
   let drewLastFrame = false;
 
@@ -190,10 +235,10 @@
   function updateBrush(e) {
     const d = contactDiameter(e);
     if (d > 0) {
-      const target = Math.min(BRUSH_MAX, Math.max(BRUSH_MIN, BRUSH_RADIUS * d / REF_CONTACT));
+      const target = Math.min(cfg.BRUSH_MAX, Math.max(cfg.BRUSH_MIN, cfg.BRUSH_RADIUS * d / REF_CONTACT));
       brush += (target - brush) * 0.35;  // contact readings are noisy
     } else {
-      brush = BRUSH_RADIUS;
+      brush = cfg.BRUSH_RADIUS;
     }
     if (debug) debug.textContent = `contact ${d.toFixed(1)}px \u2192 brush ${brush.toFixed(1)}px`;
   }
@@ -208,9 +253,9 @@
   function onDown(e) {
     if (pointer) return;
     pointer = { id: e.pointerId, x: e.clientX, y: e.clientY };
-    brush = BRUSH_RADIUS;
+    brush = cfg.BRUSH_RADIUS;
     updateBrush(e);
-    try { document.body.setPointerCapture(e.pointerId); } catch (_) {}
+    try { stage.setPointerCapture(e.pointerId); } catch (_) {}
     wipeLine(pointer.x, pointer.y, pointer.x, pointer.y);
     if (camera === 'idle' || camera === 'error') startCamera();
     noteWipe();
@@ -283,7 +328,7 @@
   }
 
   // ---- Rendering -----------------------------------------------------------
-  function boxBlur(src, dst) {
+  function blurH(src, dst) {
     // horizontal, radius 1, edge clamped
     for (let j = 0; j < gh; j++) {
       const row = j * gw;
@@ -291,22 +336,24 @@
         const a = src[row + (i > 0 ? i - 1 : 0)];
         const b = src[row + i];
         const c = src[row + (i < gw - 1 ? i + 1 : i)];
-        dst[row + i] = (a + b + c) / 3;
+        dst[row + i] = a * EDGE_W + b * EDGE_C + c * EDGE_W;
       }
     }
   }
-  function boxBlurV(src, dst) {
+  function blurV(src, dst) {
     for (let j = 0; j < gh; j++) {
       const up = (j > 0 ? j - 1 : 0) * gw;
       const mid = j * gw;
       const dn = (j < gh - 1 ? j + 1 : j) * gw;
       for (let i = 0; i < gw; i++) {
-        dst[mid + i] = (src[up + i] + src[mid + i] + src[dn + i]) / 3;
+        dst[mid + i] = (src[up + i] + src[dn + i]) * EDGE_W + src[mid + i] * EDGE_C;
       }
     }
   }
 
   function buildMask(now) {
+    EDGE_W = cfg.EDGE_SOFTNESS * cfg.EDGE_SOFTNESS / 3; // side weight of the 3-tap kernel
+    EDGE_C = 1 - 2 * EDGE_W;
     // Per-cell clearness: 1 for HOLD_MS after a wipe, then linear ramp to 0 over FADE_MS.
     for (let k = 0; k < alpha.length; k++) {
       const age = now - wipedAt[k];
@@ -316,8 +363,8 @@
     }
     // Soften the grid so the upscale has no visible blockiness.
     for (let p = 0; p < SMOOTH_PASS; p++) {
-      boxBlur(alpha, tmp);
-      boxBlurV(tmp, alpha);
+      blurH(alpha, tmp);
+      blurV(tmp, alpha);
     }
     const d = maskImg.data;
     for (let k = 0, o = 3; k < alpha.length; k++, o += 4) d[o] = alpha[k] * 255 + 0.5;
@@ -367,15 +414,70 @@
     drewLastFrame = true;
   }
 
+  // ---- Tuning panel (?tune) -------------------------------------------------
+  function buildPanel() {
+    const sliders = [
+      ['BRUSH_MIN',     'Thin radius',    2, 40, 1],
+      ['BRUSH_RADIUS',  'Medium radius',  4, 60, 1],
+      ['BRUSH_MAX',     'Thick radius',   8, 90, 1],
+      ['EDGE_SOFTNESS', 'Edge softness',  0.2, 1.2, 0.05]
+    ];
+    const panel = document.createElement('div');
+    panel.id = 'tune';
+    const outs = {};
+    const fmt = (k, v) => k === 'EDGE_SOFTNESS' ? Number(v).toFixed(2) : String(Math.round(v));
+    for (const [key, label, min, max, step] of sliders) {
+      const row = document.createElement('label');
+      row.className = 'row';
+      const name = document.createElement('span');
+      name.textContent = label;
+      const input = document.createElement('input');
+      input.type = 'range';
+      input.min = min; input.max = max; input.step = step;
+      input.value = cfg[key];
+      const out = document.createElement('output');
+      out.textContent = fmt(key, cfg[key]);
+      input.addEventListener('input', () => {
+        cfg[key] = parseFloat(input.value);
+        out.textContent = fmt(key, cfg[key]);
+        brush = cfg.BRUSH_RADIUS;
+      });
+      outs[key] = [input, out];
+      row.append(name, input, out);
+      panel.appendChild(row);
+    }
+    const bar = document.createElement('div');
+    bar.className = 'bar';
+    const copy = document.createElement('button');
+    copy.textContent = 'Copy';
+    const reset = document.createElement('button');
+    reset.textContent = 'Reset';
+    const line = () => sliders.map(([k]) => `${k}=${fmt(k, cfg[k])}`).join(' ');
+    copy.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(line()); copy.textContent = 'Copied'; }
+      catch (_) { copy.textContent = 'Copy failed'; }
+      setTimeout(() => { copy.textContent = 'Copy'; }, 1200);
+    });
+    reset.addEventListener('click', () => {
+      Object.assign(cfg, DEFAULTS);
+      for (const [k, [input, out]] of Object.entries(outs)) { input.value = cfg[k]; out.textContent = fmt(k, cfg[k]); }
+    });
+    debug.className = 'info';
+    bar.append(copy, reset, debug);
+    panel.appendChild(bar);
+    document.body.appendChild(panel);
+  }
+  if (params.has('tune')) buildPanel();
+
   // ---- Boot ----------------------------------------------------------------
   window.addEventListener('resize', resize);
   window.addEventListener('orientationchange', resize);
-  document.body.addEventListener('touchstart', readTouch, { passive: true });
-  document.body.addEventListener('touchmove', readTouch, { passive: true });
-  document.body.addEventListener('pointerdown', onDown);
-  document.body.addEventListener('pointermove', onMove);
-  document.body.addEventListener('pointerup', onUp);
-  document.body.addEventListener('pointercancel', onUp);
+  stage.addEventListener('touchstart', readTouch, { passive: true });
+  stage.addEventListener('touchmove', readTouch, { passive: true });
+  stage.addEventListener('pointerdown', onDown);
+  stage.addEventListener('pointermove', onMove);
+  stage.addEventListener('pointerup', onUp);
+  stage.addEventListener('pointercancel', onUp);
   document.addEventListener('gesturestart', e => e.preventDefault());
   document.addEventListener('contextmenu', e => e.preventDefault());
 
