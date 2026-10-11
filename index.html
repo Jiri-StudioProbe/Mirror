@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="theme-color" content="#9fb0bd">
+<meta name="theme-color" content="#f0f1f3">
 <title>Misty Mirror</title>
 <link rel="icon" href="data:,">
 <style>
@@ -12,7 +12,7 @@
     margin: 0;
     height: 100%;
     overflow: hidden;
-    background: #9fb0bd;
+    background: #f0f1f3;
     overscroll-behavior: none;
   }
   body {
@@ -63,6 +63,27 @@
     pointer-events: none;
   }
 
+  /* Fades the top and bottom edges into the browser toolbar colour (also the
+     theme-color above) so the page doesn't end in a hard line. */
+  .edgefade {
+    position: absolute;
+    left: 0; right: 0;
+    height: var(--edge-fade, 72px);
+    pointer-events: none;
+  }
+  #topfade {
+    top: 0;
+    background: linear-gradient(to bottom,
+      #f0f1f3 0%, rgba(240,241,243,.78) 22%, rgba(240,241,243,.45) 46%,
+      rgba(240,241,243,.18) 72%, rgba(240,241,243,0) 100%);
+  }
+  #bottomfade {
+    bottom: 0;
+    background: linear-gradient(to top,
+      #f0f1f3 0%, rgba(240,241,243,.78) 22%, rgba(240,241,243,.45) 46%,
+      rgba(240,241,243,.18) 72%, rgba(240,241,243,0) 100%);
+  }
+
   #hint {
     position: absolute;
     left: 0; right: 0;
@@ -111,6 +132,8 @@
   <div id="pane"></div>
   <video id="feed" playsinline webkit-playsinline muted autoplay></video>
   <canvas id="clear"></canvas>
+  <div id="topfade" class="edgefade"></div>
+  <div id="bottomfade" class="edgefade"></div>
   <div id="hint">Touch the glass to wipe the mist</div>
 </div>
 
@@ -126,9 +149,11 @@
     BRUSH_MIN: 2,           // CSS px, smallest brush from contact size
     BRUSH_RADIUS: 17,       // CSS px, brush at the reference contact size
     BRUSH_MAX: 77,          // CSS px, largest brush from contact size
-    EDGE_SOFTNESS: 0.7      // wipe-edge softness; 1 = softest, lower = sharper
+    EDGE_SOFTNESS: 0.7,     // wipe-edge softness; 1 = softest, lower = sharper
+    EDGE_FADE: 72           // CSS px, top/bottom fade into the toolbar colour; 0 = off
   };
   const cfg = Object.assign({}, DEFAULTS);
+  const applyEdgeFade = () => stage.style.setProperty('--edge-fade', cfg.EDGE_FADE + 'px');
   const REF_CONTACT  = 28;    // CSS px, finger contact diameter that gives cfg.BRUSH_RADIUS
   const FOG_BLUR     = 28;    // CSS px
   // --------------------------------------------------------------------------
@@ -420,7 +445,8 @@
       ['BRUSH_MIN',     'Thin radius',    2, 40, 1],
       ['BRUSH_RADIUS',  'Medium radius',  4, 60, 1],
       ['BRUSH_MAX',     'Thick radius',   8, 90, 1],
-      ['EDGE_SOFTNESS', 'Edge softness',  0.2, 1.2, 0.05]
+      ['EDGE_SOFTNESS', 'Edge softness',  0.2, 1.2, 0.05],
+      ['EDGE_FADE',     'Bar fade',       0, 160, 2]
     ];
     const panel = document.createElement('div');
     panel.id = 'tune';
@@ -441,6 +467,7 @@
         cfg[key] = parseFloat(input.value);
         out.textContent = fmt(key, cfg[key]);
         brush = cfg.BRUSH_RADIUS;
+        applyEdgeFade();
       });
       outs[key] = [input, out];
       row.append(name, input, out);
@@ -461,6 +488,7 @@
     reset.addEventListener('click', () => {
       Object.assign(cfg, DEFAULTS);
       for (const [k, [input, out]] of Object.entries(outs)) { input.value = cfg[k]; out.textContent = fmt(k, cfg[k]); }
+      applyEdgeFade();
     });
     debug.className = 'info';
     bar.append(copy, reset, debug);
@@ -468,6 +496,7 @@
     document.body.appendChild(panel);
   }
   if (params.has('tune')) buildPanel();
+  applyEdgeFade();
 
   // ---- Boot ----------------------------------------------------------------
   window.addEventListener('resize', resize);
