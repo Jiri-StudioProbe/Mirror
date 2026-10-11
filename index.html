@@ -4,7 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="theme-color" content="#f0f1f3">
+<meta name="theme-color" content="#9fb0bd">
+<script>
+  // With ?tune, restore the saved "Bar fade" choice before first paint so the
+  // browser bars pick up the right colour on load.
+  try {
+    if (/[?&]tune\b/.test(location.search) && parseFloat(localStorage.getItem('mm.fade')) > 0) {
+      document.querySelector('meta[name="theme-color"]').setAttribute('content', '#f0f1f3');
+      document.documentElement.style.backgroundColor = '#f0f1f3';
+    }
+  } catch (_) {}
+</script>
 <title>Misty Mirror</title>
 <link rel="icon" href="data:,">
 <style>
@@ -12,7 +22,7 @@
     margin: 0;
     height: 100%;
     overflow: hidden;
-    background: #f0f1f3;
+    background: #9fb0bd;
     overscroll-behavior: none;
   }
   body {
@@ -63,12 +73,12 @@
     pointer-events: none;
   }
 
-  /* Fades the top and bottom edges into the browser toolbar colour (also the
-     theme-color above) so the page doesn't end in a hard line. */
+  /* Optional (?tune "Bar fade"): fades the top and bottom edges into the toolbar
+     colour #f0f1f3 so the page doesn't end in a hard line. Off by default. */
   .edgefade {
     position: absolute;
     left: 0; right: 0;
-    height: var(--edge-fade, 72px);
+    height: var(--edge-fade, 0px);
     pointer-events: none;
   }
   #topfade {
@@ -150,10 +160,24 @@
     BRUSH_RADIUS: 17,       // CSS px, brush at the reference contact size
     BRUSH_MAX: 77,          // CSS px, largest brush from contact size
     EDGE_SOFTNESS: 0.7,     // wipe-edge softness; 1 = softest, lower = sharper
-    EDGE_FADE: 72           // CSS px, top/bottom fade into the toolbar colour; 0 = off
+    EDGE_FADE: 0            // CSS px, top/bottom fade into the toolbar colour; 0 = off
   };
   const cfg = Object.assign({}, DEFAULTS);
-  const applyEdgeFade = () => stage.style.setProperty('--edge-fade', cfg.EDGE_FADE + 'px');
+  const tuning = /[?&]tune\b/.test(location.search);
+  if (tuning) {
+    try { cfg.EDGE_FADE = parseFloat(localStorage.getItem('mm.fade')) || 0; } catch (_) {}
+  }
+  // Fade on: bars and page background become #f0f1f3 and the edges fade into it.
+  // Fade off: the original grey bars, no fade.
+  const applyEdgeFade = () => {
+    const on = cfg.EDGE_FADE > 0;
+    const colour = on ? '#f0f1f3' : '#9fb0bd';
+    stage.style.setProperty('--edge-fade', cfg.EDGE_FADE + 'px');
+    document.querySelector('meta[name="theme-color"]').setAttribute('content', colour);
+    document.documentElement.style.backgroundColor = colour;
+    document.body.style.backgroundColor = colour;
+    if (tuning) { try { localStorage.setItem('mm.fade', String(cfg.EDGE_FADE)); } catch (_) {} }
+  };
   const REF_CONTACT  = 28;    // CSS px, finger contact diameter that gives cfg.BRUSH_RADIUS
   const FOG_BLUR     = 28;    // CSS px
   // --------------------------------------------------------------------------
@@ -493,6 +517,10 @@
     debug.className = 'info';
     bar.append(copy, reset, debug);
     panel.appendChild(bar);
+    const note = document.createElement('div');
+    note.style.cssText = 'margin-top:6px;opacity:.6;font-size:11px';
+    note.textContent = 'Bar fade is saved on this device; reload to update the browser bar colour.';
+    panel.appendChild(note);
     document.body.appendChild(panel);
   }
   if (params.has('tune')) buildPanel();
