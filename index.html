@@ -65,6 +65,21 @@
     pointer-events: none;
   }
 
+  /* Fades the top edge into the browser bar's colour (see updateTint) so the
+     page doesn't start with a hard line under the status bar. */
+  #topfade {
+    position: absolute;
+    left: 0; right: 0; top: 0;
+    height: 72px;
+    pointer-events: none;
+    background: linear-gradient(to bottom,
+      rgba(var(--tint-rgb, 192,204,213), 1) 0%,
+      rgba(var(--tint-rgb, 192,204,213), .78) 22%,
+      rgba(var(--tint-rgb, 192,204,213), .45) 46%,
+      rgba(var(--tint-rgb, 192,204,213), .18) 72%,
+      rgba(var(--tint-rgb, 192,204,213), 0) 100%);
+  }
+
   #hint {
     position: absolute;
     left: 0; right: 0;
@@ -113,6 +128,7 @@
   <div id="pane"></div>
   <video id="feed" playsinline webkit-playsinline muted autoplay></video>
   <canvas id="clear"></canvas>
+  <div id="topfade"></div>
   <div id="hint">Touch the glass to wipe the mist</div>
 </div>
 
@@ -413,6 +429,7 @@
     const css = `rgb(${tint.map(Math.round).join(',')})`;
     if (themeMeta) themeMeta.setAttribute('content', css);
     document.documentElement.style.backgroundColor = css;
+    document.documentElement.style.setProperty('--tint-rgb', tint.map(Math.round).join(','));
     document.body.style.backgroundColor = css;
   }
 
