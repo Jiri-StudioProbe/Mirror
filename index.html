@@ -162,12 +162,14 @@
     BRUSH_RADIUS: 17,       // CSS px, brush at the reference contact size
     BRUSH_MAX: 77,          // CSS px, largest brush from contact size
     EDGE_SOFTNESS: 0.7,     // wipe-edge softness; 1 = softest, lower = sharper
-    EDGE_FADE: 0            // CSS px, top/bottom fade into the toolbar colour; 0 = off
+    EDGE_FADE: 0,           // CSS px, top/bottom fade into the toolbar colour; 0 = off
+    SOUND: 0                // wipe sound volume, 0-100; 0 = off
   };
   const cfg = Object.assign({}, DEFAULTS);
   const tuning = /[?&]tune\b/.test(location.search);
   if (tuning) {
     try { cfg.EDGE_FADE = parseFloat(localStorage.getItem('mm.fade')) || 0; } catch (_) {}
+    try { cfg.SOUND = parseFloat(localStorage.getItem('mm.sound')) || 0; } catch (_) {}
   }
   // Fade on: bars and page background become #f0f1f3 and the edges fade into it.
   // Fade off: the original grey bars, no fade.
@@ -259,6 +261,107 @@
     layoutFeed();
   }
 
+  // ---- Wipe sound ----------------------------------------------------------
+  // Synthesised, no audio files: a soft "swish" of filtered noise plus a faint,
+  // intermittent stick-slip squeak, both driven by how fast the finger moves.
+  let audio = null;      // built lazily on a user gesture
+  let moved = 0;         // px travelled since the last frame
+  let speed = 0;         // smoothed finger speed, px/s
+  let squeakGate = 0.4;  // slow random walk that makes the squeak come and go
+  let lastSoundT = 0;
+
+  function ensureAudio() {
+    if (cfg.SOUND <= 0) return;
+    if (!audio) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      // iOS: let Web Audio play even with the silent switch on.
+      try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (_) {}
+      const ctx = new AC();
+      const master = ctx.createGain();
+      master.gain.value = 0;
+      master.connect(ctx.destination);
+
+      // Swish: looping noise through a band-pass.
+      const buf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
+      const data = buf.getChannelData(0);
+      let last = 0;
+      for (let i = 0; i < data.length; i++) {      // slightly "pink" noise
+        const white = Math.random() * 2 - 1;
+        last = (last + 0.12 * white) / 1.12;
+        data[i] = last * 3.2;
+      }
+      const noise = ctx.createBufferSource();
+      noise.buffer = buf;
+      noise.loop = true;
+      const swishBand = ctx.createBiquadFilter();
+      swishBand.type = 'bandpass';
+      swishBand.frequency.value = 2400;
+      swishBand.Q.value = 0.9;
+      const swishGain = ctx.createGain();
+      swishGain.gain.value = 0;
+      noise.connect(swishBand).connect(swishGain).connect(master);
+      noise.start();
+
+      // Squeak: a thin tone, roughened by a fast tremolo (stick-slip).
+      const osc = ctx.createOscillator();
+      osc.type = 'sawtooth';
+      osc.frequency.value = 1800;
+      const squeakBand = ctx.createBiquadFilter();
+      squeakBand.type = 'bandpass';
+      squeakBand.frequency.value = 2300;
+      squeakBand.Q.value = 7;
+      const tremolo = ctx.createGain();
+      tremolo.gain.value = 0.5;
+      const lfo = ctx.createOscillator();
+      lfo.frequency.value = 62;
+      const lfoDepth = ctx.createGain();
+      lfoDepth.gain.value = 0.5;
+      lfo.connect(lfoDepth).connect(tremolo.gain);
+      const squeakGain = ctx.createGain();
+      squeakGain.gain.value = 0;
+      osc.connect(squeakBand).connect(tremolo).connect(squeakGain).connect(master);
+      osc.start();
+      lfo.start();
+
+      audio = { ctx, master, swishBand, swishGain, osc, lfo, squeakBand, squeakGain };
+    }
+    if (audio.ctx.state === 'suspended') audio.ctx.resume();
+  }
+
+  function updateSound(now) {
+    const dt = Math.max(1, now - lastSoundT) / 1000;
+    lastSoundT = now;
+    const inst = moved / dt;
+    moved = 0;
+    speed += (inst - speed) * Math.min(1, dt * 14);
+    if (!audio) return;
+    const t = audio.ctx.currentTime;
+    const vol = Math.pow(cfg.SOUND / 100, 2);
+    audio.master.gain.setTargetAtTime(vol, t, 0.05);
+
+    const touching = pointer !== null;
+    const level = touching ? Math.min(1, Math.pow(speed / 900, 0.7)) : 0;
+
+    // Wider contact = lower, breathier swish; faster = brighter.
+    audio.swishBand.frequency.setTargetAtTime(Math.max(900, 3000 - brush * 12 + speed * 0.3), t, 0.05);
+    audio.swishGain.gain.setTargetAtTime(level * 1.5, t, 0.04);
+
+    squeakGate = Math.min(1, Math.max(0, squeakGate + (Math.random() - 0.5) * 0.16));
+    const gate = squeakGate > 0.6 ? (squeakGate - 0.6) / 0.4 : 0;
+    const squeakLevel = level > 0.12 ? gate * level * 0.22 : 0;
+    const pitch = 1500 + Math.min(speed, 1500) * 0.7 + (Math.random() - 0.5) * 120;
+    audio.osc.frequency.setTargetAtTime(pitch, t, 0.03);
+    audio.squeakBand.frequency.setTargetAtTime(pitch * 1.1, t, 0.03);
+    audio.lfo.frequency.setTargetAtTime(48 + Math.min(speed, 1200) * 0.03, t, 0.05);
+    audio.squeakGain.gain.setTargetAtTime(squeakLevel, t, 0.03);
+  }
+
+  const applySound = () => {
+    if (tuning) { try { localStorage.setItem('mm.sound', String(cfg.SOUND)); } catch (_) {} }
+    ensureAudio();
+  };
+
   // ---- Wiping --------------------------------------------------------------
   function stamp(x, y, now) {
     const r  = brush / CELL;
@@ -280,6 +383,7 @@
   function wipeLine(x0, y0, x1, y1) {
     const now  = performance.now();
     const dist = Math.hypot(x1 - x0, y1 - y0);
+    moved += dist;
     const step = brush / 4;
     const n    = Math.max(1, Math.ceil(dist / step));
     for (let k = 1; k <= n; k++) {
@@ -319,6 +423,7 @@
     pointer = { id: e.pointerId, x: e.clientX, y: e.clientY };
     brush = cfg.BRUSH_RADIUS;
     updateBrush(e);
+    ensureAudio();
     try { stage.setPointerCapture(e.pointerId); } catch (_) {}
     wipeLine(pointer.x, pointer.y, pointer.x, pointer.y);
     if (camera === 'idle' || camera === 'error') startCamera();
@@ -342,6 +447,7 @@
 
   function onUp(e) {
     if (pointer && e.pointerId === pointer.id) pointer = null;
+    ensureAudio();   // iOS only unlocks audio on touch end
   }
 
   function noteWipe() {
@@ -470,6 +576,7 @@
   function frame() {
     requestAnimationFrame(frame);
     const now = performance.now();
+    updateSound(now);
     const active = camera === 'live' && feed.readyState >= 2 &&
                    now - lastWipe < HOLD_MS + FADE_MS;
     if (!active) {
@@ -502,7 +609,8 @@
       ['BRUSH_RADIUS',  'Medium radius',  4, 60, 1],
       ['BRUSH_MAX',     'Thick radius',   8, 90, 1],
       ['EDGE_SOFTNESS', 'Edge softness',  0.2, 1.2, 0.05],
-      ['EDGE_FADE',     'Bar fade',       0, 160, 2]
+      ['EDGE_FADE',     'Bar fade',       0, 160, 2],
+      ['SOUND',         'Sound volume',   0, 100, 5]
     ];
     const panel = document.createElement('div');
     panel.id = 'tune';
@@ -524,6 +632,7 @@
         out.textContent = fmt(key, cfg[key]);
         brush = cfg.BRUSH_RADIUS;
         applyEdgeFade();
+        applySound();
       });
       outs[key] = [input, out];
       row.append(name, input, out);
@@ -545,13 +654,14 @@
       Object.assign(cfg, DEFAULTS);
       for (const [k, [input, out]] of Object.entries(outs)) { input.value = cfg[k]; out.textContent = fmt(k, cfg[k]); }
       applyEdgeFade();
+      applySound();
     });
     debug.className = 'info';
     bar.append(copy, reset, debug);
     panel.appendChild(bar);
     const note = document.createElement('div');
     note.style.cssText = 'margin-top:6px;opacity:.6;font-size:11px';
-    note.textContent = 'Bar fade is saved on this device; reload to update the browser bar colour.';
+    note.textContent = 'Bar fade and sound are saved on this device (?tune only). Reload to update the browser bar colour. Sound plays after your first touch.';
     panel.appendChild(note);
     document.body.appendChild(panel);
   }
