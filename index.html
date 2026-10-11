@@ -123,10 +123,10 @@
   const FADE_MS      = 5000;  // then fades back to fog over this long
   // Tuned live with ?tune. BRUSH_RADIUS is used when the device reports no contact size.
   const DEFAULTS = {
-    BRUSH_MIN: 12,          // CSS px, smallest brush from contact size
-    BRUSH_RADIUS: 26,       // CSS px, brush at the reference contact size
-    BRUSH_MAX: 46,          // CSS px, largest brush from contact size
-    EDGE_SOFTNESS: 0.8      // wipe-edge softness; 1 = softest, lower = sharper
+    BRUSH_MIN: 2,           // CSS px, smallest brush from contact size
+    BRUSH_RADIUS: 17,       // CSS px, brush at the reference contact size
+    BRUSH_MAX: 77,          // CSS px, largest brush from contact size
+    EDGE_SOFTNESS: 0.7      // wipe-edge softness; 1 = softest, lower = sharper
   };
   const cfg = Object.assign({}, DEFAULTS);
   const REF_CONTACT  = 28;    // CSS px, finger contact diameter that gives cfg.BRUSH_RADIUS
