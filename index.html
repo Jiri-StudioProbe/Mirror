@@ -4,14 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="theme-color" content="#9fb0bd">
+<meta name="theme-color" content="#f0f1f3">
 <script>
-  // With ?tune, restore the saved "Bar fade" choice before first paint so the
-  // browser bars pick up the right colour on load.
+  // With ?tune, if the saved "Bar fade" choice is off, use the plain grey bars before
+  // first paint so the browser bars pick up the right colour on load.
   try {
-    if (/[?&]tune\b/.test(location.search) && parseFloat(localStorage.getItem('mm.fade')) > 0) {
-      document.querySelector('meta[name="theme-color"]').setAttribute('content', '#f0f1f3');
-      document.documentElement.style.backgroundColor = '#f0f1f3';
+    if (/[?&]tune\b/.test(location.search) && parseFloat(localStorage.getItem('mm.fade.v2')) === 0) {
+      document.querySelector('meta[name="theme-color"]').setAttribute('content', '#9fb0bd');
+      document.documentElement.style.backgroundColor = '#9fb0bd';
     }
   } catch (_) {}
 </script>
@@ -22,7 +22,7 @@
     margin: 0;
     height: 100%;
     overflow: hidden;
-    background: #9fb0bd;
+    background: #f0f1f3;
     overscroll-behavior: none;
   }
   body {
@@ -75,12 +75,12 @@
     pointer-events: none;
   }
 
-  /* Optional (?tune "Bar fade"): fades the top and bottom edges into the toolbar
-     colour #f0f1f3 so the page doesn't end in a hard line. Off by default. */
+  /* Fades the top and bottom edges into the toolbar colour #f0f1f3 so the page
+     doesn't end in a hard line. Length is EDGE_FADE (0 = off, set in ?tune). */
   .edgefade {
     position: absolute;
     left: 0; right: 0;
-    height: var(--edge-fade, 0px);
+    height: var(--edge-fade, 20px);
     pointer-events: none;
   }
   #topfade {
@@ -162,17 +162,22 @@
     BRUSH_RADIUS: 17,       // CSS px, brush at the reference contact size
     BRUSH_MAX: 77,          // CSS px, largest brush from contact size
     EDGE_SOFTNESS: 0.7,     // wipe-edge softness; 1 = softest, lower = sharper
-    EDGE_FADE: 0,           // CSS px, top/bottom fade into the toolbar colour; 0 = off
-    SOUND: 0                // wipe sound volume, 0-100; 0 = off
+    EDGE_FADE: 20,          // CSS px, top/bottom fade into the toolbar colour; 0 = off
+    SOUND: 50               // wipe sound volume, 0-100; 0 = off
   };
   const cfg = Object.assign({}, DEFAULTS);
   const tuning = /[?&]tune\b/.test(location.search);
   if (tuning) {
-    try { cfg.EDGE_FADE = parseFloat(localStorage.getItem('mm.fade')) || 0; } catch (_) {}
-    try { cfg.SOUND = parseFloat(localStorage.getItem('mm.sound')) || 0; } catch (_) {}
+    // Values saved from the panel override the defaults (only with ?tune).
+    try {
+      const f = parseFloat(localStorage.getItem('mm.fade.v2'));
+      const v = parseFloat(localStorage.getItem('mm.sound.v2'));
+      if (!isNaN(f)) cfg.EDGE_FADE = f;
+      if (!isNaN(v)) cfg.SOUND = v;
+    } catch (_) {}
   }
-  // Fade on: bars and page background become #f0f1f3 and the edges fade into it.
-  // Fade off: the original grey bars, no fade.
+  // Fade on: bars and page background are #f0f1f3 and the edges fade into it.
+  // Fade off (0): the original grey bars, no fade.
   const applyEdgeFade = () => {
     const on = cfg.EDGE_FADE > 0;
     const colour = on ? '#f0f1f3' : '#9fb0bd';
@@ -180,7 +185,7 @@
     document.querySelector('meta[name="theme-color"]').setAttribute('content', colour);
     document.documentElement.style.backgroundColor = colour;
     document.body.style.backgroundColor = colour;
-    if (tuning) { try { localStorage.setItem('mm.fade', String(cfg.EDGE_FADE)); } catch (_) {} }
+    if (tuning) { try { localStorage.setItem('mm.fade.v2', String(cfg.EDGE_FADE)); } catch (_) {} }
   };
   const REF_CONTACT  = 28;    // CSS px, finger contact diameter that gives cfg.BRUSH_RADIUS
   const FOG_BLUR     = 28;    // CSS px
@@ -353,7 +358,7 @@
   }
 
   const applySound = () => {
-    if (tuning) { try { localStorage.setItem('mm.sound', String(cfg.SOUND)); } catch (_) {} }
+    if (tuning) { try { localStorage.setItem('mm.sound.v2', String(cfg.SOUND)); } catch (_) {} }
     ensureAudio();
   };
 
