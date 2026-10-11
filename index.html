@@ -262,12 +262,19 @@
   }
 
   // ---- Wipe sound ----------------------------------------------------------
-  // Synthesised, no audio files: a soft "swish" of filtered noise plus a faint,
-  // intermittent stick-slip squeak, both driven by how fast the finger moves.
-  let audio = null;      // built lazily on a user gesture
-  let moved = 0;         // px travelled since the last frame
-  let speed = 0;         // smoothed finger speed, px/s
-  let squeakGate = 0.4;  // slow random walk that makes the squeak come and go
+  // audio/squeaks.mp3 is a set of short finger-on-glass squeaks cut from a single
+  // recording. While the finger is actually moving over the glass we play one
+  // randomly chosen squeak at a time (louder when faster); when it stops, we fade out.
+  const SQUEAKS = [[0.0,0.38],[0.43,0.3],[0.78,0.34],[1.17,0.31],[1.53,0.27],[1.85,0.33],[2.23,0.27],[2.55,0.32],[2.92,0.31],[3.28,0.63],[3.96,0.42],[4.43,0.39],[4.87,0.31],[5.23,1.14],[6.42,0.27],[6.74,1.11],[7.9,0.78],[8.73,0.55],[9.33,1.08],[10.46,0.99],[11.5,0.33],[11.88,0.32],[12.25,0.68],[12.98,0.28],[13.31,0.3],[13.66,0.92],[14.63,1.17],[15.85,0.6],[16.5,1.17],[17.72,0.53],[18.3,1.35],[19.7,0.54],[20.29,0.76],[21.1,1.19],[22.34,0.42],[22.81,0.34],[23.2,0.35],[23.6,0.29],[23.94,1.23],[25.22,0.27],[25.54,0.45],[26.04,0.4],[26.49,0.45],[26.99,0.29],[27.33,0.43],[27.81,0.33],[28.19,0.42]]; // [start s, length s] within squeaks.mp3
+  const SPEED_ON  = 140;  // px/s the finger must exceed to start a squeak
+  const SPEED_OFF = 60;   // px/s below which the current squeak is faded out
+  let audio = null;       // built lazily on a user gesture
+  let moved = 0;          // px travelled since the last frame
+  let speed = 0;          // smoothed finger speed, px/s
+  let voice = null;       // { src, gain, endsAt }
+  let nextAt = 0;         // audio time before which no new squeak starts
+  const recent = [];      // last few squeak indices, to avoid repeats
+  let slowSince = 0;      // when the finger last dropped below SPEED_OFF (ms), 0 if not slow
   let lastSoundT = 0;
 
   function ensureAudio() {
@@ -281,52 +288,39 @@
       const master = ctx.createGain();
       master.gain.value = 0;
       master.connect(ctx.destination);
-
-      // Swish: looping noise through a band-pass.
-      const buf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
-      const data = buf.getChannelData(0);
-      let last = 0;
-      for (let i = 0; i < data.length; i++) {      // slightly "pink" noise
-        const white = Math.random() * 2 - 1;
-        last = (last + 0.12 * white) / 1.12;
-        data[i] = last * 3.2;
-      }
-      const noise = ctx.createBufferSource();
-      noise.buffer = buf;
-      noise.loop = true;
-      const swishBand = ctx.createBiquadFilter();
-      swishBand.type = 'bandpass';
-      swishBand.frequency.value = 2400;
-      swishBand.Q.value = 0.9;
-      const swishGain = ctx.createGain();
-      swishGain.gain.value = 0;
-      noise.connect(swishBand).connect(swishGain).connect(master);
-      noise.start();
-
-      // Squeak: a thin tone, roughened by a fast tremolo (stick-slip).
-      const osc = ctx.createOscillator();
-      osc.type = 'sawtooth';
-      osc.frequency.value = 1800;
-      const squeakBand = ctx.createBiquadFilter();
-      squeakBand.type = 'bandpass';
-      squeakBand.frequency.value = 2300;
-      squeakBand.Q.value = 7;
-      const tremolo = ctx.createGain();
-      tremolo.gain.value = 0.5;
-      const lfo = ctx.createOscillator();
-      lfo.frequency.value = 62;
-      const lfoDepth = ctx.createGain();
-      lfoDepth.gain.value = 0.5;
-      lfo.connect(lfoDepth).connect(tremolo.gain);
-      const squeakGain = ctx.createGain();
-      squeakGain.gain.value = 0;
-      osc.connect(squeakBand).connect(tremolo).connect(squeakGain).connect(master);
-      osc.start();
-      lfo.start();
-
-      audio = { ctx, master, swishBand, swishGain, osc, lfo, squeakBand, squeakGain };
+      audio = { ctx, master, buffer: null };
+      fetch('audio/squeaks.mp3')
+        .then(r => r.arrayBuffer())
+        .then(data => new Promise((ok, fail) => ctx.decodeAudioData(data, ok, fail)))
+        .then(buf => { audio.buffer = buf; })
+        .catch(() => {});
     }
     if (audio.ctx.state === 'suspended') audio.ctx.resume();
+  }
+
+  function startSqueak(t) {
+    let idx;
+    do { idx = Math.floor(Math.random() * SQUEAKS.length); } while (recent.includes(idx));
+    recent.push(idx);
+    if (recent.length > 4) recent.shift();
+    const [off, len] = SQUEAKS[idx];
+    const rate = 0.95 + Math.random() * 0.12;           // slight pitch variation
+    const src = audio.ctx.createBufferSource();
+    src.buffer = audio.buffer;
+    src.playbackRate.value = rate;
+    const gain = audio.ctx.createGain();
+    gain.gain.value = 0;
+    src.connect(gain).connect(audio.master);
+    src.start(t, off, len);
+    voice = { src, gain, endsAt: t + len / rate };
+  }
+
+  function stopSqueak(t) {
+    if (!voice) return;
+    voice.gain.gain.cancelScheduledValues(t);
+    voice.gain.gain.setTargetAtTime(0, t, 0.02);
+    try { voice.src.stop(t + 0.12); } catch (_) {}
+    voice = null;
   }
 
   function updateSound(now) {
@@ -337,24 +331,25 @@
     speed += (inst - speed) * Math.min(1, dt * 14);
     if (!audio) return;
     const t = audio.ctx.currentTime;
-    const vol = Math.pow(cfg.SOUND / 100, 2);
-    audio.master.gain.setTargetAtTime(vol, t, 0.05);
+    audio.master.gain.setTargetAtTime(Math.pow(cfg.SOUND / 100, 1.5), t, 0.05);
+    if (!audio.buffer) return;
 
-    const touching = pointer !== null;
-    const level = touching ? Math.min(1, Math.pow(speed / 900, 0.7)) : 0;
-
-    // Wider contact = lower, breathier swish; faster = brighter.
-    audio.swishBand.frequency.setTargetAtTime(Math.max(900, 3000 - brush * 12 + speed * 0.3), t, 0.05);
-    audio.swishGain.gain.setTargetAtTime(level * 1.5, t, 0.04);
-
-    squeakGate = Math.min(1, Math.max(0, squeakGate + (Math.random() - 0.5) * 0.16));
-    const gate = squeakGate > 0.6 ? (squeakGate - 0.6) / 0.4 : 0;
-    const squeakLevel = level > 0.12 ? gate * level * 0.22 : 0;
-    const pitch = 1500 + Math.min(speed, 1500) * 0.7 + (Math.random() - 0.5) * 120;
-    audio.osc.frequency.setTargetAtTime(pitch, t, 0.03);
-    audio.squeakBand.frequency.setTargetAtTime(pitch * 1.1, t, 0.03);
-    audio.lfo.frequency.setTargetAtTime(48 + Math.min(speed, 1200) * 0.03, t, 0.05);
-    audio.squeakGain.gain.setTargetAtTime(squeakLevel, t, 0.03);
+    // Start above SPEED_ON; once playing, only stop after ~100ms below SPEED_OFF so
+    // tiny pauses and direction changes don't chop the squeak.
+    if (speed < SPEED_OFF) { if (!slowSince) slowSince = now; } else slowSince = 0;
+    const smudging = pointer !== null &&
+      (voice ? !(slowSince && now - slowSince > 100) : speed > SPEED_ON);
+    if (voice && t >= voice.endsAt) {            // finished naturally
+      voice = null;
+      nextAt = t + 0.04 + Math.random() * 0.16;  // short, uneven pause between squeaks
+    }
+    if (!smudging) { stopSqueak(t); return; }
+    if (!voice && t >= nextAt) startSqueak(t);
+    if (voice) {
+      // Louder when the finger moves faster.
+      const level = 0.3 + 0.7 * Math.min(1, speed / 800);
+      voice.gain.gain.setTargetAtTime(level, t, 0.03);
+    }
   }
 
   const applySound = () => {
