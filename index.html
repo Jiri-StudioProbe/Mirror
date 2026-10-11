@@ -164,7 +164,7 @@
     EDGE_SOFTNESS: 0.7,     // wipe-edge softness; 1 = softest, lower = sharper
     EDGE_FADE: 20,          // CSS px, top/bottom fade into the toolbar colour; 0 = off
     SOUND: 50,              // wipe sound volume, 0-100; 0 = off
-    WRITE_WIDTH: 3          // CSS px, line width of the greeting written on the mirror; 0 = off
+    WRITE_WIDTH: 4.5        // CSS px, line width of the greeting written on the mirror; 0 = off
   };
   const cfg = Object.assign({}, DEFAULTS);
   const tuning = /[?&]tune\b/.test(location.search);
@@ -226,7 +226,6 @@
   let maskCanvas, maskCtx, maskImg;
   let lastWipe = -Infinity;     // newest wipe anywhere, to skip idle frames
   let camera = 'idle';          // idle | asking | live | error
-  let wipedOnce = false;
   let pointer = null;           // { id, x, y }
   let brush = cfg.BRUSH_RADIUS;     // current brush radius, CSS px
   let touchDiameter = 0;        // latest Touch radius * 2 (iOS fallback)
@@ -437,7 +436,6 @@
     ensureAudio();
     try { stage.setPointerCapture(e.pointerId); } catch (_) {}
     wipeLine(pointer.x, pointer.y, pointer.x, pointer.y);
-    noteWipe();
     e.preventDefault();
   }
 
@@ -451,7 +449,6 @@
       pointer.x = ev.clientX;
       pointer.y = ev.clientY;
     }
-    noteWipe();
     e.preventDefault();
   }
 
@@ -460,14 +457,8 @@
     ensureAudio();   // iOS only unlocks audio on touch end
   }
 
-  function noteWipe() {
-    if (!wipedOnce && camera === 'live') {
-      wipedOnce = true;
-      hint.classList.add('hidden');
-    }
-  }
-
   // ---- Camera --------------------------------------------------------------
+  // The only on-screen text is a short message if the camera can't be started.
   function say(text) {
     hint.textContent = text;
     hint.classList.remove('hidden');
@@ -496,7 +487,6 @@
       return;
     }
     camera = 'asking';
-    setTimeout(() => { if (camera === 'asking') say('Allow camera access…'); }, 400);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
@@ -514,8 +504,7 @@
       layoutFeed();
       feed.classList.add('live');
       camera = 'live';
-      wipedOnce = false;
-      hint.classList.add('hidden');
+      hint.classList.add('hidden');   // clears any earlier error message
       greet();
     } catch (err) {
       camera = 'error';
@@ -642,9 +631,6 @@
   function greet() {
     const now = performance.now();
     ink = buildInk(now + 500);
-    if (!ink) { say('Wipe the mist with your finger'); return; }
-    // Show the usual hint once the writing is done, unless they have already wiped.
-    setTimeout(() => { if (!wipedOnce) say('Wipe the mist with your finger'); }, ink.end - now + 400);
   }
 
   function eraseInk(x, y, r) {

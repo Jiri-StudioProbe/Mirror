@@ -4,7 +4,7 @@ POC: a fogged live camera mirror. The camera is requested on load, and "Hello yo
 
 Open `index.html` over HTTPS or `localhost` (camera access requires a secure context), e.g. `python3 -m http.server` and visit `http://localhost:8000`. Tunables (`HOLD_MS`, `FADE_MS`, `FOG_BLUR` and the `DEFAULTS` block) are at the top of the script.
 
-Brush width follows finger contact size where the device reports it (clamped by `BRUSH_MIN`/`BRUSH_MAX`, scaled by `REF_CONTACT`). Add `?tune` to the URL for a panel with sliders for the brush sizes, edge softness, bar fade, sound volume and greeting line width, plus a Replay button for the greeting. Add `?debug` to see only the reported contact size.
+Brush width follows finger contact size where the device reports it (clamped by `BRUSH_MIN`/`BRUSH_MAX`, scaled by `REF_CONTACT`). Add `?tune` to the URL for a panel with sliders for the brush sizes, edge softness, bar fade, sound volume and greeting line width (default 4.5), plus a Replay button for the greeting. Add `?debug` to see only the reported contact size.
 
 ## Credits
 
